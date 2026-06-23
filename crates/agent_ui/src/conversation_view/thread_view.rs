@@ -4160,6 +4160,7 @@ impl ThreadView {
                                             .children(self.mode_selector.clone())
                                             .children(self.model_selector.clone()),
                                     })
+                                    .child(self.render_voice_input_button(cx))
                                     .child(self.render_send_button(cx)),
                             ),
                     ),
@@ -4952,6 +4953,37 @@ impl ThreadView {
                 y: px(-2.0),
             })
             .anchor(gpui::Anchor::BottomLeft)
+    }
+
+    fn render_voice_input_button(&self, _cx: &mut Context<Self>) -> impl IntoElement {
+        PopoverMenu::new("voice-input-menu")
+            .trigger_with_tooltip(
+                IconButton::new("voice-input", IconName::Mic)
+                    .icon_size(IconSize::Small)
+                    .icon_color(Color::Muted),
+                Tooltip::text("Voice Input"),
+            )
+            .menu(|window, cx| {
+                Some(ContextMenu::build(window, cx, |menu, _window, _cx| {
+                    menu.custom_row(|_window, _cx| {
+                        v_flex()
+                            .max_w_64()
+                            .gap_1()
+                            .p_2()
+                            .child(Label::new("ZedVC Voice Input"))
+                            .child(
+                                Label::new("Voice input prototype is connected.")
+                                    .color(Color::Muted),
+                            )
+                            .into_any_element()
+                    })
+                }))
+            })
+            .offset(gpui::Point {
+                x: px(0.0),
+                y: px(-2.0),
+            })
+            .anchor(gpui::Anchor::BottomRight)
     }
 
     fn render_send_button(&self, cx: &mut Context<Self>) -> AnyElement {
