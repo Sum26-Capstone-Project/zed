@@ -702,6 +702,18 @@ impl MessageEditor {
         &self.editor
     }
 
+    pub fn insert_transcription_text(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.editor.update(cx, |editor, cx| {
+            editor.insert(text, window, cx);
+            editor.request_autoscroll(Autoscroll::fit(), cx);
+        });
+    }
+
     pub fn is_empty(&self, cx: &App) -> bool {
         self.editor.read(cx).text(cx).trim().is_empty()
     }
