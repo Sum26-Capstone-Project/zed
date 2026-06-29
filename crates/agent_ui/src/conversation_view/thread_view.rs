@@ -7,6 +7,7 @@ use crate::{
 };
 use agent_client_protocol::schema as acp;
 use std::cell::RefCell;
+use std::ops::Range;
 
 use acp_thread::{
     ContentBlock, PlanEntry, SandboxAuthorizationDetails, SandboxFallbackAuthorizationDetails,
@@ -14,6 +15,9 @@ use acp_thread::{
 };
 use agent::{SkillLoadingIssue, SkillLoadingIssueKind, SkillLoadingIssuesUpdated};
 use agent_settings::UserAgentsMd;
+use agent_voice_detector::{
+    Transcriber, TranscriberConfig, TranscriberEvent, WebSocketTranscriber, DEFAULT_WEBSOCKET_URL,
+};
 use agent_skills::MAX_SKILL_DESCRIPTION_LEN;
 use cloud_api_types::{SubmitAgentThreadFeedbackBody, SubmitAgentThreadFeedbackCommentsBody};
 use editor::actions::OpenExcerpts;
@@ -22,6 +26,7 @@ use crate::completion_provider::AvailableSkill;
 use crate::message_editor::SharedSessionCapabilities;
 
 use db::kvp::KeyValueStore;
+use futures::StreamExt as _;
 use gpui::List;
 use gpui::Stateful;
 use gpui::TaskExt;
@@ -71,8 +76,25 @@ const VOICE_INPUT_RED_DOT_LIGHT: Hsla = Hsla {
     l: 0.62,
     a: 1.0,
 };
-const MOCK_TRANSCRIPTION_CHUNKS: &[&str] =
-    &["This ", "is ", "a mocked ", "voice ", "transcription."];
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum VoiceInputState {
+    #[default]
+    Idle,
+    Listening,
+}
+
+impl VoiceInputState {
+    fn label(&self) -> Option<&'static str> {
+        match self {
+            Self::Idle => None,
+            Self::Listening => Some("Listening..."),
+        }
+    }
+
+    fn is_active(&self) -> bool {
+        matches!(self, Self::Listening)
+    }
+}
 
 #[derive(Default)]
 struct ThreadFeedbackState {
@@ -216,54 +238,6 @@ impl ThreadFeedbackState {
 
         editor.read(cx).focus_handle(cx).focus(window, cx);
         editor
-    }
-}
-
-#[derive(Clone)]
-struct VoiceRecording {
-    path: PathBuf,
-}
-
-struct MockVoiceRecorder;
-
-impl MockVoiceRecorder {
-    fn start() -> VoiceRecording {
-        VoiceRecording {
-            path: std::env::temp_dir().join("zedvc-mock-recording.wav"),
-        }
-    }
-}
-
-struct MockVoiceTranscriber;
-
-impl MockVoiceTranscriber {
-    fn chunks(recording: &VoiceRecording) -> &'static [&'static str] {
-        let _recording_path = &recording.path;
-        MOCK_TRANSCRIPTION_CHUNKS
-    }
-}
-
-#[derive(Clone, Default)]
-enum VoiceInputState {
-    #[default]
-    Idle,
-    Listening {
-        recording: VoiceRecording,
-    },
-    Transcribing,
-}
-
-impl VoiceInputState {
-    fn label(&self) -> Option<&'static str> {
-        match self {
-            Self::Idle => None,
-            Self::Listening { .. } => Some("Listening..."),
-            Self::Transcribing => Some("Transcribing..."),
-        }
-    }
-
-    fn is_active(&self) -> bool {
-        !matches!(self, Self::Idle)
     }
 }
 
@@ -688,6 +662,8 @@ pub struct ThreadView {
     pub _subscriptions: Vec<Subscription>,
     pub message_editor: Entity<MessageEditor>,
     voice_input_state: VoiceInputState,
+    voice_transcriber: WebSocketTranscriber,
+    voice_partial_transcript_range: Option<Range<multi_buffer::Anchor>>,
     voice_input_task: Option<Task<()>>,
     pub add_context_menu_handle: PopoverMenuHandle<ContextMenu>,
     pub thinking_effort_menu_handle: PopoverMenuHandle<ContextMenu>,
@@ -1069,6 +1045,8 @@ impl ThreadView {
             in_flight_prompt: None,
             message_editor,
             voice_input_state: VoiceInputState::Idle,
+            voice_transcriber: WebSocketTranscriber::new(),
+            voice_partial_transcript_range: None,
             voice_input_task: None,
             add_context_menu_handle: PopoverMenuHandle::default(),
             thinking_effort_menu_handle: PopoverMenuHandle::default(),
@@ -5075,10 +5053,10 @@ impl ThreadView {
 
     fn render_voice_input_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let is_active = self.voice_input_state.is_active();
-        let tooltip = match &self.voice_input_state {
-            VoiceInputState::Idle => "Start Voice Input",
-            VoiceInputState::Listening { .. } => "Stop Recording",
-            VoiceInputState::Transcribing => "Transcribing Voice Input",
+        let tooltip = if self.voice_input_state.is_active() {
+            "Stop Voice Input"
+        } else {
+            "Start Voice Input"
         };
 
         div()
@@ -5197,57 +5175,119 @@ impl ThreadView {
     }
 
     fn toggle_voice_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match self.voice_input_state.clone() {
-            VoiceInputState::Idle => self.start_voice_input(cx),
-            VoiceInputState::Listening { recording } => {
-                self.finish_voice_input(recording, window, cx);
-            }
-            VoiceInputState::Transcribing => {}
+        if self.voice_input_state.is_active() {
+            self.stop_voice_input(cx);
+        } else {
+            self.start_voice_input(window, cx);
         }
     }
 
-    fn start_voice_input(&mut self, cx: &mut Context<Self>) {
+    fn start_voice_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.voice_input_task.take();
-        self.voice_input_state = VoiceInputState::Listening {
-            recording: MockVoiceRecorder::start(),
-        };
-        cx.notify();
-    }
+        self.voice_partial_transcript_range = None;
 
-    fn finish_voice_input(
-        &mut self,
-        recording: VoiceRecording,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.voice_input_state = VoiceInputState::Transcribing;
+        let (transcript_tx, mut transcript_rx) = futures::channel::mpsc::unbounded();
+        let config = TranscriberConfig {
+            websocket_url: DEFAULT_WEBSOCKET_URL.into(),
+            input_device: None,
+        };
 
         self.voice_input_task = Some(cx.spawn_in(window, async move |this, cx| {
-            let chunks = MockVoiceTranscriber::chunks(&recording);
+            while let Some(event) = transcript_rx.next().await {
+                let stop_after = matches!(
+                    &event,
+                    TranscriberEvent::Error { .. } | TranscriberEvent::Stopped
+                );
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.handle_transcriber_event(event, window, cx);
+                });
 
-            for chunk in chunks {
-                cx.background_executor()
-                    .timer(Duration::from_millis(280))
-                    .await;
-
-                let chunk = chunk.to_string();
-                this.update_in(cx, |this, window, cx| {
-                    this.message_editor.update(cx, |message_editor, cx| {
-                        message_editor.insert_transcription_text(&chunk, window, cx);
-                    });
-                })
-                .log_err();
+                if stop_after {
+                    break;
+                }
             }
 
             this.update(cx, |this, cx| {
-                this.voice_input_state = VoiceInputState::Idle;
-                this.voice_input_task.take();
-                cx.notify();
+                if this.voice_input_state.is_active() {
+                    this.voice_input_state = VoiceInputState::Idle;
+                    this.voice_input_task.take();
+                    this.voice_partial_transcript_range = None;
+                    cx.notify();
+                }
             })
             .log_err();
         }));
 
+        self.voice_transcriber
+            .start(config, transcript_tx, cx.background_executor().clone())
+            .detach_and_log_err(cx);
+
+        self.voice_input_state = VoiceInputState::Listening;
         cx.notify();
+    }
+
+    fn stop_voice_input(&mut self, cx: &mut Context<Self>) {
+        if !self.voice_input_state.is_active() {
+            return;
+        }
+
+        self.voice_transcriber.stop().detach_and_log_err(cx);
+        self.voice_input_state = VoiceInputState::Idle;
+        self.voice_input_task.take();
+        self.voice_partial_transcript_range = None;
+        cx.notify();
+    }
+
+    fn handle_transcriber_event(
+        &mut self,
+        event: TranscriberEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            TranscriberEvent::Started => {}
+            TranscriberEvent::Stopped => {
+                self.voice_input_state = VoiceInputState::Idle;
+                self.voice_input_task.take();
+                self.voice_partial_transcript_range = None;
+            }
+            TranscriberEvent::Transcript(update) => {
+                self.message_editor.update(cx, |message_editor, cx| {
+                    message_editor.update_transcription_text(
+                        &update.text,
+                        update.is_final,
+                        &mut self.voice_partial_transcript_range,
+                        window,
+                        cx,
+                    );
+                });
+            }
+            TranscriberEvent::Error { message } => {
+                self.show_voice_input_error(message, cx);
+                self.voice_input_state = VoiceInputState::Idle;
+                self.voice_input_task.take();
+                self.voice_partial_transcript_range = None;
+            }
+        }
+        cx.notify();
+    }
+
+    fn show_voice_input_error(&self, message: SharedString, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            log::error!("voice input failed: {message}");
+            return;
+        };
+
+        struct VoiceInputErrorToast;
+        workspace.update(cx, |workspace, cx| {
+            workspace.show_toast(
+                Toast::new(
+                    NotificationId::unique::<VoiceInputErrorToast>(),
+                    format!("Voice input failed: {message}"),
+                ),
+                cx,
+            );
+        });
     }
 
     fn render_add_context_button(&mut self, cx: &mut Context<Self>) -> impl IntoElement {

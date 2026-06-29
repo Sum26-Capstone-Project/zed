@@ -1,0 +1,29 @@
+[package]
+name = "agent_voice_detector"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/agent_voice_detector.rs"
+
+[dependencies]
+anyhow.workspace = true
+async-tungstenite = { workspace = true, features = ["tokio", "tokio-runtime"] }
+audio.workspace = true
+cpal.workspace = true
+futures.workspace = true
+gpui.workspace = true
+log.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["time"] }
+
+[target.'cfg(not(any(all(target_os = "windows", target_env = "gnu"), target_os = "freebsd")))'.dependencies]
+libwebrtc.workspace = true

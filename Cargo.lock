@@ -460,6 +460,7 @@ dependencies = [
  "agent_servers",
  "agent_settings",
  "agent_skills",
+ "agent_voice_detector",
  "ai_onboarding",
  "anyhow",
  "async-channel 2.5.0",
@@ -552,6 +553,25 @@ dependencies = [
  "watch",
  "workspace",
  "zed_actions",
+]
+
+[[package]]
+name = "agent_voice_detector"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-tungstenite",
+ "audio",
+ "cpal",
+ "futures 0.3.32",
+ "gpui",
+ "libwebrtc",
+ "log",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.17",
+ "tokio",
 ]
 
 [[package]]

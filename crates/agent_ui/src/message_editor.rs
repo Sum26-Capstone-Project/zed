@@ -714,6 +714,45 @@ impl MessageEditor {
         });
     }
 
+    pub fn update_transcription_text(
+        &mut self,
+        text: &str,
+        is_final: bool,
+        partial_range: &mut Option<Range<multi_buffer::Anchor>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if text.is_empty() {
+            if is_final {
+                *partial_range = None;
+            }
+            return;
+        }
+
+        self.editor.update(cx, |editor, cx| {
+            editor.transact(window, cx, |editor, window, cx| {
+                let range_start = if let Some(range) = partial_range.take() {
+                    editor.change_selections(Default::default(), window, cx, |selections| {
+                        selections.select_ranges([range]);
+                    });
+                    editor.selections.newest_anchor().start
+                } else {
+                    editor.selections.newest_anchor().head()
+                };
+
+                editor.insert(text, window, cx);
+                editor.request_autoscroll(Autoscroll::fit(), cx);
+
+                if is_final {
+                    return;
+                }
+
+                let range_end = editor.selections.newest_anchor().head();
+                *partial_range = Some(range_start..range_end);
+            });
+        });
+    }
+
     pub fn is_empty(&self, cx: &App) -> bool {
         self.editor.read(cx).text(cx).trim().is_empty()
     }
