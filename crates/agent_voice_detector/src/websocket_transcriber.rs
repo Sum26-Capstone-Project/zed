@@ -4,6 +4,7 @@ use std::thread;
 use anyhow::Context as _;
 use async_tungstenite::tungstenite::{client::IntoClientRequest, Message};
 use futures::{
+    lock::Mutex as AsyncMutex,
     StreamExt as _,
     channel::{mpsc, oneshot},
     select,
@@ -11,7 +12,7 @@ use futures::{
 use gpui::{BackgroundExecutor, SharedString, Task};
 use parking_lot::Mutex;
 
-use crate::audio_capture::{AudioCapture, AudioCaptureConfig, AudioChunk};
+use crate::audio_capture::{AudioCapture, AudioCaptureConfig, AudioCaptureState, AudioChunk};
 use crate::transcriber::{
     Transcriber, TranscriberConfig, TranscriberError, TranscriberEvent, TranscriberState,
     TranscriptUpdate,
@@ -20,6 +21,10 @@ use crate::transcriber::{
 pub const DEFAULT_WEBSOCKET_URL: &str = "ws://127.0.0.1:8765/ws/stream";
 
 const WEBSOCKET_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const WEBSOCKET_CONNECT_ATTEMPTS: u32 = 30;
+const WEBSOCKET_CONNECT_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(500);
+const SESSION_IDLE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
+const SESSION_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 fn websocket_runtime() -> &'static tokio::runtime::Runtime {
     static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
@@ -36,6 +41,7 @@ struct WebSocketTranscriberInner {
     state: Arc<Mutex<TranscriberState>>,
     stop_tx: Arc<Mutex<Option<oneshot::Sender<()>>>>,
     capture: Arc<Mutex<AudioCapture>>,
+    session_lock: Arc<AsyncMutex<()>>,
 }
 
 pub struct WebSocketTranscriber {
@@ -55,6 +61,7 @@ impl WebSocketTranscriber {
                 state: Arc::new(Mutex::new(TranscriberState::Idle)),
                 stop_tx: Arc::new(Mutex::new(None)),
                 capture: Arc::new(Mutex::new(AudioCapture::new())),
+                session_lock: Arc::new(AsyncMutex::new(())),
             },
         }
     }
@@ -71,20 +78,22 @@ impl Transcriber for WebSocketTranscriber {
         events: mpsc::UnboundedSender<TranscriberEvent>,
         executor: BackgroundExecutor,
     ) -> Task<Result<(), TranscriberError>> {
-        if *self.inner.state.lock() == TranscriberState::Listening {
-            return Task::ready(Err(TranscriberError::AlreadyListening));
+        if let Some(stop_tx) = self.inner.stop_tx.lock().take() {
+            let _ = stop_tx.send(());
         }
 
         let (stop_tx, stop_rx) = oneshot::channel();
         *self.inner.stop_tx.lock() = Some(stop_tx);
-        *self.inner.state.lock() = TranscriberState::Listening;
 
         let inner = self.inner.clone();
         let state = inner.state.clone();
+        let session_lock = inner.session_lock.clone();
         let session_executor = executor.clone();
         executor.spawn(async move {
-            let result =
-                run_session(config, events, stop_rx, inner, session_executor).await;
+            let _session_guard = session_lock.lock().await;
+            wait_for_capture_idle(&inner, &session_executor).await;
+            *state.lock() = TranscriberState::Listening;
+            let result = run_session(config, events, stop_rx, inner, session_executor).await;
             *state.lock() = TranscriberState::Idle;
             result
         })
@@ -115,6 +124,20 @@ impl From<crate::audio_capture::AudioCaptureError> for TranscriberError {
 enum WebSocketCommand {
     SendChunk(AudioChunk),
     Shutdown,
+}
+
+async fn wait_for_capture_idle(
+    inner: &WebSocketTranscriberInner,
+    executor: &BackgroundExecutor,
+) {
+    let deadline = std::time::Instant::now() + SESSION_IDLE_TIMEOUT;
+    while inner.capture.lock().state() == AudioCaptureState::Capturing {
+        if std::time::Instant::now() >= deadline {
+            log::warn!("timed out waiting for audio capture to stop before starting a new session");
+            break;
+        }
+        executor.timer(SESSION_IDLE_POLL_INTERVAL).await;
+    }
 }
 
 async fn run_session(
@@ -224,15 +247,37 @@ fn run_websocket_thread(
     connected_tx: oneshot::Sender<()>,
 ) -> anyhow::Result<()> {
     websocket_runtime().block_on(async move {
-        let request = websocket_url
-            .into_client_request()
-            .context("invalid websocket URL")?;
+        let mut last_error = None;
+        let mut websocket = None;
+        for attempt in 0..WEBSOCKET_CONNECT_ATTEMPTS {
+            let request = websocket_url
+                .clone()
+                .into_client_request()
+                .context("invalid websocket URL")?;
+            let connect = async_tungstenite::tokio::connect_async(request);
+            match tokio::time::timeout(WEBSOCKET_CONNECT_TIMEOUT, connect).await {
+                Ok(Ok((stream, _response))) => {
+                    websocket = Some(stream);
+                    break;
+                }
+                Ok(Err(error)) => {
+                    last_error = Some(anyhow::anyhow!(error));
+                }
+                Err(_) => {
+                    last_error = Some(anyhow::anyhow!("timed out connecting to speech-to-text server"));
+                }
+            }
 
-        let connect = async_tungstenite::tokio::connect_async(request);
-        let (mut websocket, _response) = tokio::time::timeout(WEBSOCKET_CONNECT_TIMEOUT, connect)
-            .await
-            .context("timed out connecting to speech-to-text server")?
-            .context("failed to connect to speech-to-text server")?;
+            if attempt + 1 < WEBSOCKET_CONNECT_ATTEMPTS {
+                tokio::time::sleep(WEBSOCKET_CONNECT_RETRY_DELAY).await;
+            }
+        }
+
+        let mut websocket = websocket.with_context(|| {
+            last_error
+                .map(|error| format!("failed to connect to speech-to-text server: {error:#}"))
+                .unwrap_or_else(|| "failed to connect to speech-to-text server".to_string())
+        })?;
 
         if connected_tx.send(()).is_err() {
             return Ok(());
@@ -245,7 +290,12 @@ fn run_websocket_thread(
                         Some(WebSocketCommand::SendChunk(chunk)) => {
                             send_audio_chunk(&mut websocket, &chunk).await?;
                         }
-                        Some(WebSocketCommand::Shutdown) | None => break,
+                        Some(WebSocketCommand::Shutdown) | None => {
+                            let _ = websocket
+                                .send(Message::Text(r#"{"command":"stop"}"#.into()))
+                                .await;
+                            break;
+                        }
                     }
                 }
                 message = websocket.next() => {
@@ -292,8 +342,6 @@ async fn send_audio_chunk(
     >,
     chunk: &AudioChunk,
 ) -> anyhow::Result<()> {
-    use futures::SinkExt as _;
-
     let mut bytes = Vec::with_capacity(chunk.byte_len());
     for sample in &chunk.samples {
         bytes.extend_from_slice(&sample.to_le_bytes());
@@ -337,6 +385,7 @@ fn handle_text_message(
                 log::debug!("transcriber event receiver dropped");
             }
         }
+        Ok(TranscriptServerMessage::Ignored) => {}
         Err(error) => {
             log::warn!("ignoring invalid speech-to-text message: {error:#}");
         }
@@ -348,6 +397,7 @@ fn handle_text_message(
 enum TranscriptServerMessage {
     Transcript(TranscriptUpdate),
     Error { message: SharedString },
+    Ignored,
 }
 
 fn parse_transcript_message(text: &str) -> anyhow::Result<TranscriptServerMessage> {
@@ -375,7 +425,7 @@ fn parse_transcript_message(text: &str) -> anyhow::Result<TranscriptServerMessag
         .and_then(|message_type| message_type.as_str())
         == Some("status")
     {
-        return Err(anyhow::anyhow!("control message"));
+        return Ok(TranscriptServerMessage::Ignored);
     }
 
     let transcript = value
@@ -384,7 +434,7 @@ fn parse_transcript_message(text: &str) -> anyhow::Result<TranscriptServerMessag
         .unwrap_or_default();
 
     if transcript.is_empty() {
-        return Err(anyhow::anyhow!("empty transcript"));
+        return Ok(TranscriptServerMessage::Ignored);
     }
 
     let is_final = value
@@ -417,6 +467,7 @@ mod tests {
                 assert!(!update.is_final);
             }
             TranscriptServerMessage::Error { .. } => panic!("expected transcript"),
+            TranscriptServerMessage::Ignored => panic!("expected transcript"),
         }
     }
 
@@ -432,12 +483,16 @@ mod tests {
                 assert!(update.is_final);
             }
             TranscriptServerMessage::Error { .. } => panic!("expected transcript"),
+            TranscriptServerMessage::Ignored => panic!("expected transcript"),
         }
     }
 
     #[test]
     fn ignores_status_messages() {
-        assert!(parse_transcript_message(r#"{"type":"status","text":"ready"}"#).is_err());
+        assert!(matches!(
+            parse_transcript_message(r#"{"type":"status","text":"ready"}"#),
+            Ok(TranscriptServerMessage::Ignored)
+        ));
     }
 
     #[test]
@@ -449,6 +504,7 @@ mod tests {
                 assert!(!update.is_final);
             }
             TranscriptServerMessage::Error { .. } => panic!("expected transcript"),
+            TranscriptServerMessage::Ignored => panic!("expected transcript"),
         }
     }
 
@@ -460,6 +516,7 @@ mod tests {
                 assert_eq!(message.as_ref(), "model unavailable");
             }
             TranscriptServerMessage::Transcript(_) => panic!("expected error"),
+            TranscriptServerMessage::Ignored => panic!("expected error"),
         }
     }
 }

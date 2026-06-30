@@ -5183,6 +5183,10 @@ impl ThreadView {
     }
 
     fn start_voice_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.voice_input_state.is_active() {
+            self.stop_voice_input(cx);
+        }
+
         self.voice_input_task.take();
         self.voice_partial_transcript_range = None;
 
@@ -5257,6 +5261,7 @@ impl ThreadView {
                         &update.text,
                         update.is_final,
                         &mut self.voice_partial_transcript_range,
+                        self.voice_input_state.is_active(),
                         window,
                         cx,
                     );

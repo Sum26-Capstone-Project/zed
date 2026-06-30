@@ -16,7 +16,8 @@ use anyhow::{Result, anyhow};
 use base64::Engine as _;
 use editor::{
     Addon, AnchorRangeExt, ContextMenuOptions, Editor, EditorElement, EditorEvent, EditorMode,
-    EditorStyle, Inlay, MultiBuffer, MultiBufferOffset, MultiBufferSnapshot, ToOffset,
+    EditorStyle, Inlay, MultiBuffer, MultiBufferOffset, MultiBufferSnapshot, SelectionEffects,
+    ToOffset,
     actions::{Copy, Cut, Paste},
     code_context_menus::CodeContextMenu,
     display_map::{CreaseId, CreaseSnapshot},
@@ -719,11 +720,12 @@ impl MessageEditor {
         text: &str,
         is_final: bool,
         partial_range: &mut Option<Range<multi_buffer::Anchor>>,
+        append_after_final: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if text.is_empty() {
-            if is_final {
+            if is_final && !append_after_final {
                 *partial_range = None;
             }
             return;
@@ -731,24 +733,25 @@ impl MessageEditor {
 
         self.editor.update(cx, |editor, cx| {
             editor.transact(window, cx, |editor, window, cx| {
-                let range_start = if let Some(range) = partial_range.take() {
-                    editor.change_selections(Default::default(), window, cx, |selections| {
+                if let Some(range) = partial_range.take() {
+                    editor.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
                         selections.select_ranges([range]);
                     });
-                    editor.selections.newest_anchor().start
-                } else {
-                    editor.selections.newest_anchor().head()
-                };
+                }
 
                 editor.insert(text, window, cx);
-                editor.request_autoscroll(Autoscroll::fit(), cx);
 
                 if is_final {
+                    if append_after_final {
+                        editor.insert(" ", window, cx);
+                    }
+                    editor.request_autoscroll(Autoscroll::fit(), cx);
                     return;
                 }
 
-                let range_end = editor.selections.newest_anchor().head();
-                *partial_range = Some(range_start..range_end);
+                let selection = editor.selections.newest_anchor();
+                *partial_range = Some(selection.start..selection.head());
+                editor.request_autoscroll(Autoscroll::fit(), cx);
             });
         });
     }
