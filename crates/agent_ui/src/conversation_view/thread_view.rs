@@ -5084,7 +5084,7 @@ impl ThreadView {
                     .color(if is_active {
                         Color::Custom(VOICE_INPUT_RED_TEXT)
                     } else {
-                        Color::Muted
+                        Color::Custom(VOICE_INPUT_RED_TEXT)
                     }),
             )
             .tooltip(Tooltip::text(tooltip))
