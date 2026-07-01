@@ -1,5 +1,6 @@
 mod audio_capture;
 mod cpal_util;
+mod speech_to_text_server;
 mod transcriber;
 mod websocket_transcriber;
 

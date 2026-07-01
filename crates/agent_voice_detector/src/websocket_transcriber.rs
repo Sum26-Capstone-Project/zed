@@ -166,6 +166,10 @@ async fn run_session_inner(
     inner: WebSocketTranscriberInner,
     executor: BackgroundExecutor,
 ) -> Result<(), TranscriberError> {
+    crate::speech_to_text_server::ensure_running(&executor)
+        .await
+        .map_err(TranscriberError::Other)?;
+
     let (command_tx, command_rx) = mpsc::unbounded::<WebSocketCommand>();
     let (message_tx, mut message_rx) = mpsc::unbounded::<Result<String, anyhow::Error>>();
     let (connected_tx, connected_rx) = oneshot::channel();
