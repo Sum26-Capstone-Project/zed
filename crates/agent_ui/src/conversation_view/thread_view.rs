@@ -7,6 +7,7 @@ use crate::{
 };
 use agent_client_protocol::schema::v1 as acp;
 use std::cell::RefCell;
+use std::ops::Range;
 
 use acp_thread::{
     PlanEntry, SandboxAuthorizationDetails, SandboxFallbackAuthorizationDetails,
@@ -17,6 +18,9 @@ use agent::{
     SkillLoadingIssuesUpdated, ThreadSandbox, VerifiedSandboxStatus,
 };
 use agent_settings::UserAgentsMd;
+use agent_voice_detector::{
+    Transcriber, TranscriberConfig, TranscriberEvent, WebSocketTranscriber, DEFAULT_WEBSOCKET_URL,
+};
 use agent_skills::MAX_SKILL_DESCRIPTION_LEN;
 use cloud_api_types::{SubmitAgentThreadFeedbackBody, SubmitAgentThreadFeedbackCommentsBody};
 use editor::actions::OpenExcerpts;
@@ -27,6 +31,7 @@ use crate::message_editor::SharedSessionCapabilities;
 use crate::ui::{SandboxGroup, SandboxRow, SandboxSection, SandboxStatusTooltip};
 
 use db::kvp::KeyValueStore;
+use futures::StreamExt as _;
 use gpui::List;
 use gpui::Stateful;
 use gpui::TaskExt;
@@ -45,6 +50,55 @@ use workspace::{OpenOptions, SERIALIZATION_THROTTLE_TIME};
 use super::*;
 
 const DATA_RETENTION_LEARN_MORE_URL: &str = "https://support.claude.com/en/articles/15425996-data-retention-practices-for-mythos-class-models";
+const VOICE_INPUT_RED_BUTTON_BACKGROUND: Hsla = Hsla {
+    h: 0.0,
+    s: 0.68,
+    l: 0.18,
+    a: 1.0,
+};
+const VOICE_INPUT_RED_BORDER: Hsla = Hsla {
+    h: 0.0,
+    s: 0.72,
+    l: 0.36,
+    a: 1.0,
+};
+const VOICE_INPUT_RED_TEXT: Hsla = Hsla {
+    h: 0.0,
+    s: 0.76,
+    l: 0.58,
+    a: 1.0,
+};
+const VOICE_INPUT_RED_DOT_DARK: Hsla = Hsla {
+    h: 0.0,
+    s: 0.72,
+    l: 0.32,
+    a: 1.0,
+};
+const VOICE_INPUT_RED_DOT_LIGHT: Hsla = Hsla {
+    h: 0.0,
+    s: 0.82,
+    l: 0.62,
+    a: 1.0,
+};
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+enum VoiceInputState {
+    #[default]
+    Idle,
+    Listening,
+}
+
+impl VoiceInputState {
+    fn label(&self) -> Option<&'static str> {
+        match self {
+            Self::Idle => None,
+            Self::Listening => Some("Listening..."),
+        }
+    }
+
+    fn is_active(&self) -> bool {
+        matches!(self, Self::Listening)
+    }
+}
 
 #[derive(Default)]
 struct ThreadFeedbackState {
@@ -606,6 +660,10 @@ pub struct ThreadView {
     pub in_flight_prompt: Option<Vec<acp::ContentBlock>>,
     pub _subscriptions: Vec<Subscription>,
     pub message_editor: Entity<MessageEditor>,
+    voice_input_state: VoiceInputState,
+    voice_transcriber: WebSocketTranscriber,
+    voice_partial_transcript_range: Option<Range<multi_buffer::Anchor>>,
+    voice_input_task: Option<Task<()>>,
     pub add_context_menu_handle: PopoverMenuHandle<ContextMenu>,
     pub thinking_effort_menu_handle: PopoverMenuHandle<ContextMenu>,
     pub fast_mode_menu_handle: PopoverMenuHandle<ContextMenu>,
@@ -996,6 +1054,10 @@ impl ThreadView {
             hovered_edited_file_buttons: None,
             in_flight_prompt: None,
             message_editor,
+            voice_input_state: VoiceInputState::Idle,
+            voice_transcriber: WebSocketTranscriber::new(),
+            voice_partial_transcript_range: None,
+            voice_input_task: None,
             add_context_menu_handle: PopoverMenuHandle::default(),
             thinking_effort_menu_handle: PopoverMenuHandle::default(),
             fast_mode_menu_handle: PopoverMenuHandle::default(),
@@ -4131,6 +4193,7 @@ impl ThreadView {
                                 )
                             }),
                     )
+                    .children(self.render_voice_input_status(cx))
                     .child(
                         h_flex()
                             .w_full()
@@ -4157,6 +4220,7 @@ impl ThreadView {
                                             .children(self.mode_selector.clone())
                                             .children(self.model_selector.clone()),
                                     })
+                                    .child(self.render_voice_input_button(cx))
                                     .child(self.render_send_button(cx)),
                             ),
                     ),
@@ -5100,6 +5164,81 @@ impl ThreadView {
             .anchor(gpui::Anchor::BottomLeft)
     }
 
+    fn render_voice_input_status(&self, _cx: &mut Context<Self>) -> Option<AnyElement> {
+        let label = self.voice_input_state.label()?;
+        let dot_dark = VOICE_INPUT_RED_DOT_DARK;
+        let dot_light = VOICE_INPUT_RED_DOT_LIGHT;
+
+        Some(
+            h_flex()
+                .w_full()
+                .justify_end()
+                .gap_1()
+                .child(div().rounded_full().with_animation(
+                    "voice-input-dot",
+                    Animation::new(Duration::from_millis(900)).repeat(),
+                    move |dot, delta| {
+                        let delta = ease_in_out(delta);
+                        let color = Hsla {
+                            h: dot_dark.h,
+                            s: dot_dark.s + (dot_light.s - dot_dark.s) * delta,
+                            l: dot_dark.l + (dot_light.l - dot_dark.l) * delta,
+                            a: 1.0,
+                        };
+                        dot.size(rems_from_px(6.0 + 4.0 * delta)).bg(color)
+                    },
+                ))
+                .child(
+                    Label::new(label)
+                        .size(LabelSize::Small)
+                        .color(Color::Custom(VOICE_INPUT_RED_TEXT)),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn render_voice_input_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let is_active = self.voice_input_state.is_active();
+        let tooltip = if self.voice_input_state.is_active() {
+            "Stop Voice Input"
+        } else {
+            "Start Voice Input"
+        };
+
+        div()
+            .id("voice-input")
+            .size(rems_from_px(30.0))
+            .rounded_md()
+            .border_1()
+            .border_color(if is_active {
+                VOICE_INPUT_RED_BORDER
+            } else {
+                gpui::transparent_black()
+            })
+            .bg(if is_active {
+                VOICE_INPUT_RED_BUTTON_BACKGROUND
+            } else {
+                gpui::transparent_black()
+            })
+            .flex()
+            .items_center()
+            .justify_center()
+            .cursor_pointer()
+            .child(
+                Icon::new(IconName::Mic)
+                    .size(IconSize::Medium)
+                    .color(if is_active {
+                        Color::Custom(VOICE_INPUT_RED_TEXT)
+                    } else {
+                        Color::Custom(VOICE_INPUT_RED_TEXT)
+                    }),
+            )
+            .tooltip(Tooltip::text(tooltip))
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.toggle_voice_input(window, cx);
+            }))
+    }
+
     fn render_send_button(&self, cx: &mut Context<Self>) -> AnyElement {
         let message_editor = self.message_editor.read(cx);
         let is_editor_empty = message_editor.is_empty(cx);
@@ -5179,6 +5318,127 @@ impl ThreadView {
                 }))
                 .into_any_element()
         }
+    }
+
+    fn toggle_voice_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.voice_input_state.is_active() {
+            self.stop_voice_input(cx);
+        } else {
+            self.start_voice_input(window, cx);
+        }
+    }
+
+    fn start_voice_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.voice_input_state.is_active() {
+            self.stop_voice_input(cx);
+        }
+
+        self.voice_input_task.take();
+        self.voice_partial_transcript_range = None;
+
+        let (transcript_tx, mut transcript_rx) = futures::channel::mpsc::unbounded();
+        let config = TranscriberConfig {
+            websocket_url: DEFAULT_WEBSOCKET_URL.into(),
+            input_device: None,
+        };
+
+        self.voice_input_task = Some(cx.spawn_in(window, async move |this, cx| {
+            while let Some(event) = transcript_rx.next().await {
+                let stop_after = matches!(
+                    &event,
+                    TranscriberEvent::Error { .. } | TranscriberEvent::Stopped
+                );
+                let _ = this.update_in(cx, |this, window, cx| {
+                    this.handle_transcriber_event(event, window, cx);
+                });
+
+                if stop_after {
+                    break;
+                }
+            }
+
+            this.update(cx, |this, cx| {
+                if this.voice_input_state.is_active() {
+                    this.voice_input_state = VoiceInputState::Idle;
+                    this.voice_input_task.take();
+                    this.voice_partial_transcript_range = None;
+                    cx.notify();
+                }
+            })
+            .log_err();
+        }));
+
+        self.voice_transcriber
+            .start(config, transcript_tx, cx.background_executor().clone())
+            .detach_and_log_err(cx);
+
+        self.voice_input_state = VoiceInputState::Listening;
+        cx.notify();
+    }
+
+    fn stop_voice_input(&mut self, cx: &mut Context<Self>) {
+        if !self.voice_input_state.is_active() {
+            return;
+        }
+
+        self.voice_transcriber.stop().detach_and_log_err(cx);
+        self.voice_input_state = VoiceInputState::Idle;
+        self.voice_input_task.take();
+        self.voice_partial_transcript_range = None;
+        cx.notify();
+    }
+
+    fn handle_transcriber_event(
+        &mut self,
+        event: TranscriberEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            TranscriberEvent::Started => {}
+            TranscriberEvent::Stopped => {
+                self.voice_input_state = VoiceInputState::Idle;
+                self.voice_input_task.take();
+                self.voice_partial_transcript_range = None;
+            }
+            TranscriberEvent::Transcript(update) => {
+                self.message_editor.update(cx, |message_editor, cx| {
+                    message_editor.update_transcription_text(
+                        &update.text,
+                        update.is_final,
+                        &mut self.voice_partial_transcript_range,
+                        self.voice_input_state.is_active(),
+                        window,
+                        cx,
+                    );
+                });
+            }
+            TranscriberEvent::Error { message } => {
+                self.show_voice_input_error(message, cx);
+                self.voice_input_state = VoiceInputState::Idle;
+                self.voice_input_task.take();
+                self.voice_partial_transcript_range = None;
+            }
+        }
+        cx.notify();
+    }
+
+    fn show_voice_input_error(&self, message: SharedString, cx: &mut Context<Self>) {
+        let Some(workspace) = self.workspace.upgrade() else {
+            log::error!("voice input failed: {message}");
+            return;
+        };
+
+        struct VoiceInputErrorToast;
+        workspace.update(cx, |workspace, cx| {
+            workspace.show_toast(
+                Toast::new(
+                    NotificationId::unique::<VoiceInputErrorToast>(),
+                    format!("Voice input failed: {message}"),
+                ),
+                cx,
+            );
+        });
     }
 
     fn render_add_context_button(&mut self, cx: &mut Context<Self>) -> impl IntoElement {

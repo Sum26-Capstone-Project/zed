@@ -16,7 +16,8 @@ use anyhow::{Result, anyhow};
 use base64::Engine as _;
 use editor::{
     Addon, AnchorRangeExt, ContextMenuOptions, Editor, EditorElement, EditorEvent, EditorMode,
-    EditorStyle, Inlay, MultiBuffer, MultiBufferOffset, MultiBufferSnapshot, ToOffset,
+    EditorStyle, Inlay, MultiBuffer, MultiBufferOffset, MultiBufferSnapshot, SelectionEffects,
+    ToOffset,
     actions::{Copy, Cut, Paste},
     code_context_menus::CodeContextMenu,
     display_map::{CreaseId, CreaseSnapshot},
@@ -700,6 +701,59 @@ impl MessageEditor {
 
     pub(crate) fn editor(&self) -> &Entity<Editor> {
         &self.editor
+    }
+
+    pub fn insert_transcription_text(
+        &mut self,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.editor.update(cx, |editor, cx| {
+            editor.insert(text, window, cx);
+            editor.request_autoscroll(Autoscroll::fit(), cx);
+        });
+    }
+
+    pub fn update_transcription_text(
+        &mut self,
+        text: &str,
+        is_final: bool,
+        partial_range: &mut Option<Range<multi_buffer::Anchor>>,
+        append_after_final: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if text.is_empty() {
+            if is_final && !append_after_final {
+                *partial_range = None;
+            }
+            return;
+        }
+
+        self.editor.update(cx, |editor, cx| {
+            editor.transact(window, cx, |editor, window, cx| {
+                if let Some(range) = partial_range.take() {
+                    editor.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
+                        selections.select_ranges([range]);
+                    });
+                }
+
+                editor.insert(text, window, cx);
+
+                if is_final {
+                    if append_after_final {
+                        editor.insert(" ", window, cx);
+                    }
+                    editor.request_autoscroll(Autoscroll::fit(), cx);
+                    return;
+                }
+
+                let selection = editor.selections.newest_anchor();
+                *partial_range = Some(selection.start..selection.head());
+                editor.request_autoscroll(Autoscroll::fit(), cx);
+            });
+        });
     }
 
     pub fn is_empty(&self, cx: &App) -> bool {

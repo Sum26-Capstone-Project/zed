@@ -33,6 +33,7 @@ agent.workspace = true
 async-channel.workspace = true
 agent_servers.workspace = true
 agent_settings.workspace = true
+agent_voice_detector.workspace = true
 agent_skills.workspace = true
 ai_onboarding.workspace = true
 anyhow.workspace = true
