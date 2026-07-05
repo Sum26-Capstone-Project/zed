@@ -19,7 +19,8 @@ use agent::{
 };
 use agent_settings::UserAgentsMd;
 use agent_voice_detector::{
-    Transcriber, TranscriberConfig, TranscriberEvent, WebSocketTranscriber, DEFAULT_WEBSOCKET_URL,
+    DetectorEvent, Transcriber, TranscriberConfig, TranscriberEvent, WebSocketTranscriber,
+    DEFAULT_WEBSOCKET_URL,
 };
 use agent_skills::MAX_SKILL_DESCRIPTION_LEN;
 use cloud_api_types::{SubmitAgentThreadFeedbackBody, SubmitAgentThreadFeedbackCommentsBody};
@@ -45,7 +46,7 @@ use ui::{
     ButtonLike, CalloutBorderPosition, SpinnerLabel, SpinnerVariant, SplitButton, SplitButtonStyle,
     Tab,
 };
-use workspace::{OpenOptions, SERIALIZATION_THROTTLE_TIME};
+use workspace::{OpenOptions, SERIALIZATION_THROTTLE_TIME, Toast, notifications::NotificationId};
 
 use super::*;
 
@@ -5320,6 +5321,30 @@ impl ThreadView {
         }
     }
 
+    /// Applies a start/end word detector event to this view's voice input
+    /// button: the wake word enables voice input, the stop word disables it (both
+    /// idempotent). Called by the owning [`ConversationView`] for its active
+    /// thread.
+    pub(crate) fn handle_word_detector_event(
+        &mut self,
+        event: DetectorEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            DetectorEvent::Start => {
+                if !self.voice_input_state.is_active() {
+                    self.start_voice_input(window, cx);
+                }
+            }
+            DetectorEvent::Stop => {
+                if self.voice_input_state.is_active() {
+                    self.stop_voice_input(cx);
+                }
+            }
+        }
+    }
+
     fn toggle_voice_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.voice_input_state.is_active() {
             self.stop_voice_input(cx);
@@ -5329,8 +5354,11 @@ impl ThreadView {
     }
 
     fn start_voice_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Starting while already listening is a no-op: a repeated wake word (or a
+        // button press racing the detector) must not tear down and restart the
+        // active session.
         if self.voice_input_state.is_active() {
-            self.stop_voice_input(cx);
+            return;
         }
 
         self.voice_input_task.take();
