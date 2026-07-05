@@ -801,8 +801,8 @@ impl ConversationView {
         }));
 
         // Subscribe to the single, process-wide start/end word detector. It runs
-        // one microphone capture for all of Zed; each panel reacts only while it
-        // is focused (see `handle_voice_detector_event`).
+        // one microphone capture for all of Zed; each panel reacts only in the
+        // active window (see `handle_voice_detector_event`).
         let voice_detector = crate::voice_word_detector::VoiceWordDetector::global(cx);
         subscriptions.push(cx.subscribe_in(
             &voice_detector,
@@ -864,15 +864,15 @@ impl ConversationView {
     }
 
     /// Applies a start/end word detector event to this panel's active thread.
-    /// Only the focused panel reacts, so a phrase toggles the conversation the
-    /// user is actually looking at rather than every open panel at once.
+    /// Only the panel in the active Zed window reacts, so a phrase toggles voice
+    /// input in the window you're using even when focus is in the editor.
     fn handle_voice_detector_event(
         &mut self,
         event: DetectorEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.focus_handle.contains_focused(window, cx) {
+        if !window.is_window_active() {
             return;
         }
         if let Some(active_thread) = self.active_thread().cloned() {
