@@ -35,6 +35,7 @@ use zed_actions::{
     },
 };
 
+use agent_voice_detector::DetectorEvent;
 use crate::ExpandMessageEditor;
 use crate::ManageProfiles;
 use crate::agent_connection_store::AgentConnectionStore;
@@ -1192,6 +1193,7 @@ pub struct AgentPanel {
     _base_view_observation: Option<Subscription>,
     _draft_editor_observation: Option<Subscription>,
     _active_draft_reclaim_observation: Option<Subscription>,
+    _voice_word_detector_subscription: Option<Subscription>,
     _thread_metadata_store_subscription: Subscription,
     last_context_source: Option<AgentContextSource>,
 
@@ -1599,6 +1601,7 @@ impl AgentPanel {
             _base_view_observation: None,
             _draft_editor_observation: None,
             _active_draft_reclaim_observation: None,
+            _voice_word_detector_subscription: None,
             _thread_metadata_store_subscription,
             last_context_source: None,
             is_active: false,
@@ -4335,6 +4338,7 @@ impl AgentPanel {
     }
 
     fn refresh_base_view_subscriptions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.ensure_voice_word_detector_subscription(window, cx);
         self._base_view_observation = match &self.base_view {
             BaseView::AgentThread { conversation_view } => {
                 self._thread_view_subscription =
@@ -5144,6 +5148,7 @@ impl Panel for AgentPanel {
     fn set_active(&mut self, active: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.is_active = active;
         if active {
+            self.ensure_voice_word_detector_subscription(window, cx);
             self.ensure_thread_initialized(window, cx);
         }
     }
@@ -5193,6 +5198,58 @@ impl Panel for AgentPanel {
 }
 
 impl AgentPanel {
+    fn ensure_voice_word_detector_subscription(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self._voice_word_detector_subscription.is_some() {
+            return;
+        }
+
+        let voice_detector = crate::voice_word_detector::VoiceWordDetector::global(cx);
+        self._voice_word_detector_subscription = Some(cx.subscribe_in(
+            &voice_detector,
+            window,
+            |this, _detector, event: &DetectorEvent, window, cx| {
+                this.handle_voice_detector_event(*event, window, cx);
+            },
+        ));
+    }
+
+    fn handle_voice_detector_event(
+        &mut self,
+        event: DetectorEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !window.is_window_active() {
+            return;
+        }
+
+        let Some(conversation_view) = self.visible_conversation_view() else {
+            log::debug!("wake/stop word ignored: agent panel is not showing a thread");
+            return;
+        };
+
+        let thread_view = {
+            let conversation_view = conversation_view.read(cx);
+            conversation_view
+                .active_thread()
+                .cloned()
+                .or_else(|| conversation_view.root_thread_view())
+        };
+
+        let Some(thread_view) = thread_view else {
+            log::debug!("wake/stop word ignored: agent thread is not ready yet");
+            return;
+        };
+
+        thread_view.update(cx, |thread_view, cx| {
+            thread_view.handle_word_detector_event(event, window, cx);
+        });
+    }
+
     fn ensure_thread_initialized(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.base_view, BaseView::Uninitialized) {
             if self.pending_terminal_spawn.is_some() {

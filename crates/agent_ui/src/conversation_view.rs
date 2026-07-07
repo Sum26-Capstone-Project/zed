@@ -24,7 +24,6 @@ use editor::{
 };
 use file_icons::FileIcons;
 use fs::Fs;
-use agent_voice_detector::DetectorEvent;
 use futures::FutureExt as _;
 use gpui::{
     Action, Animation, AnimationExt, AnyView, App, ClickEvent, ClipboardItem, CursorStyle,
@@ -800,18 +799,6 @@ impl ConversationView {
             }
         }));
 
-        // Subscribe to the single, process-wide start/end word detector. It runs
-        // one microphone capture for all of Zed; each panel reacts only in the
-        // active window (see `handle_voice_detector_event`).
-        let voice_detector = crate::voice_word_detector::VoiceWordDetector::global(cx);
-        subscriptions.push(cx.subscribe_in(
-            &voice_detector,
-            window,
-            |this, _detector, event: &DetectorEvent, window, cx| {
-                this.handle_voice_detector_event(*event, window, cx);
-            },
-        ));
-
         cx.on_release(|this, cx| {
             if let Some(connected) = this.as_connected() {
                 connected.close_all_sessions(cx).detach();
@@ -860,25 +847,6 @@ impl ConversationView {
             code_span_resolver,
             _subscriptions: subscriptions,
             focus_handle: cx.focus_handle(),
-        }
-    }
-
-    /// Applies a start/end word detector event to this panel's active thread.
-    /// Only the panel in the active Zed window reacts, so a phrase toggles voice
-    /// input in the window you're using even when focus is in the editor.
-    fn handle_voice_detector_event(
-        &mut self,
-        event: DetectorEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !window.is_window_active() {
-            return;
-        }
-        if let Some(active_thread) = self.active_thread().cloned() {
-            active_thread.update(cx, |thread_view, cx| {
-                thread_view.handle_word_detector_event(event, window, cx);
-            });
         }
     }
 

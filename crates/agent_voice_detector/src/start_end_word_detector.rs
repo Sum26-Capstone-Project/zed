@@ -13,9 +13,9 @@ use crate::audio_capture::{AudioCapture, AudioCaptureConfig};
 use crate::websocket_stream::{WebSocketCommand, run_websocket_thread};
 
 /// Phrase that signals the user wants to start interacting with the agent.
-pub const WAKE_WORD: &str = "hello zed";
+pub const WAKE_WORD: &str = "hello jarvis";
 /// Phrase that signals the user wants to stop the current interaction.
-pub const STOP_WORD: &str = "stop zed";
+pub const STOP_WORD: &str = "stop jarvis";
 
 /// Phrases sent to the detection server, in the order they appear in the
 /// server's `found` response array.
@@ -231,7 +231,7 @@ mod tests {
     fn builds_url_with_encoded_phrases() {
         assert_eq!(
             detector_websocket_url(),
-            format!("ws://127.0.0.1:{SERVER_PORT}/ws/stream?phrase=hello%20zed&phrase=stop%20zed")
+            format!("ws://127.0.0.1:{SERVER_PORT}/ws/stream?phrase=hello%20jarvis&phrase=stop%20jarvis")
         );
     }
 
