@@ -644,7 +644,7 @@ pub struct ThreadView {
     pub message_editor: Entity<MessageEditor>,
     voice_input_state: VoiceInputState,
     voice_transcriber: WebSocketTranscriber,
-    voice_partial_transcript_range: Option<Range<editor::MultiBufferOffset>>,
+    voice_partial_transcript_range: Option<Range<editor::Anchor>>,
     voice_input_task: Option<Task<()>>,
     pub add_context_menu_handle: PopoverMenuHandle<ContextMenu>,
     pub thinking_effort_menu_handle: PopoverMenuHandle<ContextMenu>,

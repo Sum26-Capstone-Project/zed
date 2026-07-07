@@ -15,7 +15,7 @@ use agent_client_protocol::schema::v1 as acp;
 use anyhow::{Result, anyhow};
 use base64::Engine as _;
 use editor::{
-    Addon, AnchorRangeExt, ContextMenuOptions, Editor, EditorElement, EditorEvent, EditorMode,
+    Addon, Anchor, AnchorRangeExt, ContextMenuOptions, Editor, EditorElement, EditorEvent, EditorMode,
     EditorStyle, Inlay, MultiBuffer, MultiBufferOffset, MultiBufferSnapshot, SelectionEffects,
     ToOffset,
     actions::{Copy, Cut, Paste},
@@ -719,7 +719,7 @@ impl MessageEditor {
         &mut self,
         text: &str,
         is_final: bool,
-        partial_range: &mut Option<Range<MultiBufferOffset>>,
+        partial_range: &mut Option<Range<Anchor>>,
         append_after_final: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -738,11 +738,13 @@ impl MessageEditor {
                 let old_len = old_snapshot.len();
 
                 let replace_range = if let Some(range) = partial_range.take() {
-                    range
+                    if range.start.is_valid(&old_snapshot) && range.end.is_valid(&old_snapshot) {
+                        clamp_offset_range(range.to_offset(&old_snapshot), old_len)
+                    } else {
+                        cursor_offset_range(editor, &old_snapshot)
+                    }
                 } else {
-                    let cursor = editor.selections.newest_anchor().head();
-                    let offset = cursor.to_offset(&old_snapshot);
-                    offset..offset
+                    cursor_offset_range(editor, &old_snapshot)
                 };
 
                 buffer.update(cx, |buffer, cx| {
@@ -750,9 +752,15 @@ impl MessageEditor {
                 });
 
                 let new_snapshot = buffer.read(cx).snapshot(cx);
-                let replaced_len = replace_range.end.0 - replace_range.start.0;
-                let inserted_len = new_snapshot.len().0 - old_len.0 + replaced_len;
-                let end = MultiBufferOffset(replace_range.start.0 + inserted_len);
+                let replaced_len = replace_range
+                    .end
+                    .0
+                    .saturating_sub(replace_range.start.0);
+                let inserted_len = new_snapshot
+                    .len()
+                    .0
+                    .saturating_sub(old_len.0.saturating_sub(replaced_len));
+                let end = MultiBufferOffset(replace_range.start.0.saturating_add(inserted_len));
 
                 editor.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
                     selections.select_ranges([end..end]);
@@ -763,7 +771,10 @@ impl MessageEditor {
                         editor.insert(" ", window, cx);
                     }
                 } else {
-                    *partial_range = Some(replace_range.start..end);
+                    *partial_range = Some(
+                        new_snapshot.anchor_before(replace_range.start)
+                            ..new_snapshot.anchor_before(end),
+                    );
                 }
 
                 editor.request_autoscroll(Autoscroll::fit(), cx);
@@ -2077,6 +2088,24 @@ impl Render for MessageEditor {
                 )
             })
     }
+}
+
+fn clamp_offset_range(
+    range: Range<MultiBufferOffset>,
+    buffer_len: MultiBufferOffset,
+) -> Range<MultiBufferOffset> {
+    let start = range.start.0.min(buffer_len.0);
+    let end = range.end.0.min(buffer_len.0);
+    MultiBufferOffset(start)..MultiBufferOffset(end.max(start))
+}
+
+fn cursor_offset_range(
+    editor: &Editor,
+    snapshot: &MultiBufferSnapshot,
+) -> Range<MultiBufferOffset> {
+    let cursor = editor.selections.newest_anchor().head();
+    let offset = cursor.to_offset(snapshot);
+    offset..offset
 }
 
 pub struct MessageEditorAddon {}
