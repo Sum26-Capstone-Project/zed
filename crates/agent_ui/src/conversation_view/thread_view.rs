@@ -69,18 +69,6 @@ const VOICE_INPUT_RED_TEXT: Hsla = Hsla {
     l: 0.58,
     a: 1.0,
 };
-const VOICE_INPUT_RED_DOT_DARK: Hsla = Hsla {
-    h: 0.0,
-    s: 0.72,
-    l: 0.32,
-    a: 1.0,
-};
-const VOICE_INPUT_RED_DOT_LIGHT: Hsla = Hsla {
-    h: 0.0,
-    s: 0.82,
-    l: 0.62,
-    a: 1.0,
-};
 #[derive(Clone, Copy, Default, PartialEq, Eq)]
 enum VoiceInputState {
     #[default]
@@ -89,13 +77,6 @@ enum VoiceInputState {
 }
 
 impl VoiceInputState {
-    fn label(&self) -> Option<&'static str> {
-        match self {
-            Self::Idle => None,
-            Self::Listening => Some("Listening..."),
-        }
-    }
-
     fn is_active(&self) -> bool {
         matches!(self, Self::Listening)
     }
@@ -663,7 +644,7 @@ pub struct ThreadView {
     pub message_editor: Entity<MessageEditor>,
     voice_input_state: VoiceInputState,
     voice_transcriber: WebSocketTranscriber,
-    voice_partial_transcript_range: Option<Range<multi_buffer::Anchor>>,
+    voice_partial_transcript_range: Option<Range<editor::MultiBufferOffset>>,
     voice_input_task: Option<Task<()>>,
     pub add_context_menu_handle: PopoverMenuHandle<ContextMenu>,
     pub thinking_effort_menu_handle: PopoverMenuHandle<ContextMenu>,
@@ -4194,7 +4175,6 @@ impl ThreadView {
                                 )
                             }),
                     )
-                    .children(self.render_voice_input_status(cx))
                     .child(
                         h_flex()
                             .w_full()
@@ -5163,39 +5143,6 @@ impl ThreadView {
                 y: px(-2.0),
             })
             .anchor(gpui::Anchor::BottomLeft)
-    }
-
-    fn render_voice_input_status(&self, _cx: &mut Context<Self>) -> Option<AnyElement> {
-        let label = self.voice_input_state.label()?;
-        let dot_dark = VOICE_INPUT_RED_DOT_DARK;
-        let dot_light = VOICE_INPUT_RED_DOT_LIGHT;
-
-        Some(
-            h_flex()
-                .w_full()
-                .justify_end()
-                .gap_1()
-                .child(div().rounded_full().with_animation(
-                    "voice-input-dot",
-                    Animation::new(Duration::from_millis(900)).repeat(),
-                    move |dot, delta| {
-                        let delta = ease_in_out(delta);
-                        let color = Hsla {
-                            h: dot_dark.h,
-                            s: dot_dark.s + (dot_light.s - dot_dark.s) * delta,
-                            l: dot_dark.l + (dot_light.l - dot_dark.l) * delta,
-                            a: 1.0,
-                        };
-                        dot.size(rems_from_px(6.0 + 4.0 * delta)).bg(color)
-                    },
-                ))
-                .child(
-                    Label::new(label)
-                        .size(LabelSize::Small)
-                        .color(Color::Custom(VOICE_INPUT_RED_TEXT)),
-                )
-                .into_any_element(),
-        )
     }
 
     fn render_voice_input_button(&self, cx: &mut Context<Self>) -> impl IntoElement {

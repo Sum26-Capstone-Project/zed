@@ -719,7 +719,7 @@ impl MessageEditor {
         &mut self,
         text: &str,
         is_final: bool,
-        partial_range: &mut Option<Range<multi_buffer::Anchor>>,
+        partial_range: &mut Option<Range<MultiBufferOffset>>,
         append_after_final: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -733,24 +733,39 @@ impl MessageEditor {
 
         self.editor.update(cx, |editor, cx| {
             editor.transact(window, cx, |editor, window, cx| {
-                if let Some(range) = partial_range.take() {
-                    editor.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
-                        selections.select_ranges([range]);
-                    });
-                }
+                let buffer = editor.buffer().clone();
+                let old_snapshot = buffer.read(cx).snapshot(cx);
+                let old_len = old_snapshot.len();
 
-                editor.insert(text, window, cx);
+                let replace_range = if let Some(range) = partial_range.take() {
+                    range
+                } else {
+                    let cursor = editor.selections.newest_anchor().head();
+                    let offset = cursor.to_offset(&old_snapshot);
+                    offset..offset
+                };
+
+                buffer.update(cx, |buffer, cx| {
+                    buffer.edit([(replace_range.clone(), text)], None, cx);
+                });
+
+                let new_snapshot = buffer.read(cx).snapshot(cx);
+                let replaced_len = replace_range.end.0 - replace_range.start.0;
+                let inserted_len = new_snapshot.len().0 - old_len.0 + replaced_len;
+                let end = MultiBufferOffset(replace_range.start.0 + inserted_len);
+
+                editor.change_selections(SelectionEffects::no_scroll(), window, cx, |selections| {
+                    selections.select_ranges([end..end]);
+                });
 
                 if is_final {
                     if append_after_final {
                         editor.insert(" ", window, cx);
                     }
-                    editor.request_autoscroll(Autoscroll::fit(), cx);
-                    return;
+                } else {
+                    *partial_range = Some(replace_range.start..end);
                 }
 
-                let selection = editor.selections.newest_anchor();
-                *partial_range = Some(selection.start..selection.head());
                 editor.request_autoscroll(Autoscroll::fit(), cx);
             });
         });
