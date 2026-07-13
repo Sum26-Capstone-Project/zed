@@ -3,13 +3,17 @@ use std::thread;
 
 use anyhow::Context as _;
 use futures::{
+    io::AsyncReadExt,
     lock::Mutex as AsyncMutex,
     StreamExt as _,
     channel::{mpsc, oneshot},
     select,
 };
 use gpui::{BackgroundExecutor, SharedString, Task};
+use http_client::{AsyncBody, HttpClient, Json};
 use parking_lot::Mutex;
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 use crate::audio_capture::{AudioCapture, AudioCaptureConfig, AudioCaptureState};
 use crate::transcriber::{
@@ -19,6 +23,7 @@ use crate::transcriber::{
 use crate::websocket_stream::{WebSocketCommand, run_websocket_thread};
 
 pub const DEFAULT_WEBSOCKET_URL: &str = "ws://127.0.0.1:8765/ws/stream";
+const DEFAULT_HTTP_URL: &str = "http://127.0.0.1:8765";
 
 const SESSION_IDLE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(20);
 const SESSION_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -148,6 +153,8 @@ async fn run_session_inner(
     inner: WebSocketTranscriberInner,
     executor: BackgroundExecutor,
 ) -> Result<(), TranscriberError> {
+    configure_model(&config.http_client, &config.language).await?;
+
     let (command_tx, command_rx) = mpsc::unbounded::<WebSocketCommand>();
     let (message_tx, mut message_rx) = mpsc::unbounded::<Result<String, anyhow::Error>>();
     let (connected_tx, connected_rx) = oneshot::channel();
@@ -220,6 +227,100 @@ async fn run_session_inner(
     capture_task.await.map_err(TranscriberError::from)?;
 
     Ok(())
+}
+
+#[derive(Deserialize)]
+struct ServerStatus {
+    model: Option<String>,
+    language: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ModelSelectRequest<'a> {
+    model_name: &'a str,
+    language: &'a str,
+}
+
+async fn configure_model(
+    http_client: &Arc<dyn HttpClient>,
+    language: &str,
+) -> Result<(), TranscriberError> {
+    let mut last_error = None;
+
+    for attempt in 0..30 {
+        match configure_model_once(http_client, language).await {
+            Ok(()) => return Ok(()),
+            Err(error) => last_error = Some(error),
+        }
+
+        if attempt < 29 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }
+
+    Err(TranscriberError::Other(
+        last_error.unwrap_or_else(|| anyhow::anyhow!("failed to configure speech model")),
+    ))
+}
+
+async fn configure_model_once(
+    http_client: &Arc<dyn HttpClient>,
+    language: &str,
+) -> anyhow::Result<()> {
+    let mut status = http_client
+        .get(
+            &format!("{DEFAULT_HTTP_URL}/status"),
+            AsyncBody::empty(),
+            false,
+        )
+        .await?;
+    let mut status_body = String::new();
+    status.body_mut().read_to_string(&mut status_body).await?;
+    anyhow::ensure!(
+        status.status().is_success(),
+        "STT status request failed: {}",
+        status.status()
+    );
+    let server_status: ServerStatus = serde_json::from_str(&status_body)?;
+    if server_status.model.is_some() && server_status.language.as_deref() == Some(language) {
+        return Ok(());
+    }
+    let model_name = server_status.model.as_deref().unwrap_or("whisper_turbo");
+
+    let mut response = http_client
+        .post_json(
+            &format!("{DEFAULT_HTTP_URL}/model/select"),
+            AsyncBody::from(Json(ModelSelectRequest {
+                model_name,
+                language,
+            })),
+        )
+        .await?;
+    if response.status().is_success() {
+        return Ok(());
+    }
+
+    let mut body = String::new();
+    response.body_mut().read_to_string(&mut body).await?;
+    anyhow::bail!("STT model selection failed with {}: {body}", response.status());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ModelSelectRequest;
+
+    #[test]
+    fn model_selection_request_contains_language_code() {
+        let request = ModelSelectRequest {
+            model_name: "whisper_turbo",
+            language: "ru",
+        };
+
+        assert_eq!(
+            serde_json::to_string(&request).unwrap(),
+            r#"{"model_name":"whisper_turbo","language":"ru"}"#
+        );
+    }
 }
 
 fn emit_error(events: &mpsc::UnboundedSender<TranscriberEvent>, error: anyhow::Error) {
