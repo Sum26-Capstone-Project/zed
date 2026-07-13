@@ -80,15 +80,39 @@ enum VoiceInputState {
 enum VoiceLanguage {
     English,
     Russian,
+    French,
+    German,
+    Spanish,
+    Chinese,
+    Italian,
+    Japanese,
+    Korean,
 }
 
 impl VoiceLanguage {
-    const ALL: [Self; 2] = [Self::English, Self::Russian];
+    const ALL: [Self; 9] = [
+        Self::English,
+        Self::Russian,
+        Self::French,
+        Self::German,
+        Self::Spanish,
+        Self::Chinese,
+        Self::Italian,
+        Self::Japanese,
+        Self::Korean,
+    ];
 
     fn code(self) -> &'static str {
         match self {
             Self::English => "en",
             Self::Russian => "ru",
+            Self::French => "fr",
+            Self::German => "de",
+            Self::Spanish => "es",
+            Self::Chinese => "zh",
+            Self::Italian => "it",
+            Self::Japanese => "ja",
+            Self::Korean => "ko",
         }
     }
 
@@ -96,12 +120,26 @@ impl VoiceLanguage {
         match self {
             Self::English => "English",
             Self::Russian => "Русский",
+            Self::French => "Français",
+            Self::German => "Deutsch",
+            Self::Spanish => "Español",
+            Self::Chinese => "中文",
+            Self::Italian => "Italiano",
+            Self::Japanese => "日本語",
+            Self::Korean => "한국어",
         }
     }
 
     fn from_code(code: &str) -> Self {
         match code {
             "ru" => Self::Russian,
+            "fr" => Self::French,
+            "de" => Self::German,
+            "es" => Self::Spanish,
+            "zh" => Self::Chinese,
+            "it" => Self::Italian,
+            "ja" => Self::Japanese,
+            "ko" => Self::Korean,
             _ => Self::English,
         }
     }
