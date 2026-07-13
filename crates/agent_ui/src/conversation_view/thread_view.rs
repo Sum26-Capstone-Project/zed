@@ -5245,18 +5245,12 @@ impl ThreadView {
                                 .update(cx, |this, cx| {
                                     this.voice_language = language;
                                     let code = language.code().to_string();
-                                    let fs = this
-                                        .project
-                                        .read(cx)
-                                        .ok()
-                                        .map(|project| project.fs().clone());
-                                    if let Some(fs) = fs {
-                                        update_settings_file(fs, cx, move |settings, _| {
-                                            if let Some(agent) = settings.agent.as_mut() {
-                                                agent.voice_input_language = Some(code);
-                                            }
-                                        });
-                                    }
+                                    let fs = this.thread.read(cx).project().read(cx).fs().clone();
+                                    update_settings_file(fs, cx, move |settings, _| {
+                                        if let Some(agent) = settings.agent.as_mut() {
+                                            agent.voice_input_language = Some(code);
+                                        }
+                                    });
                                     cx.notify();
                                 })
                                 .ok();
@@ -5398,10 +5392,7 @@ impl ThreadView {
             websocket_url: DEFAULT_WEBSOCKET_URL.into(),
             input_device: None,
             http_client: {
-                let Some(project) = self.project.read(cx).ok() else {
-                    log::error!("voice input started without an active project");
-                    return;
-                };
+                let project = self.thread.read(cx).project().read(cx);
                 project.client().http_client()
             },
             language: self.voice_language.code().into(),
