@@ -13,7 +13,6 @@ use gpui::{BackgroundExecutor, SharedString, Task};
 use http_client::{AsyncBody, HttpClient, Json};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
 
 use crate::audio_capture::{AudioCapture, AudioCaptureConfig, AudioCaptureState};
 use crate::transcriber::{
