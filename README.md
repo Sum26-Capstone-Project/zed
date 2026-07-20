@@ -1,4 +1,30 @@
-# Zed
+# Zed Voice Input
+
+This fork adds local voice prompting to Zed's Agent panel. It combines native microphone capture in Zed with two local speech-to-text services: [realtime-stt-zed](https://github.com/Sum26-Capstone-Project/realtime-stt-zed) for dictation and [background-stt-zed](https://github.com/Sum26-Capstone-Project/background-stt-zed) for voice start/stop detection.
+
+## Voice input
+
+- Toggle the microphone in an Agent prompt to start or stop dictation.
+- Stream partial and final transcriptions into the prompt without overwriting already finalised text.
+- Select and persist a dictation language: English, Russian, French, German, Spanish, Chinese, Italian, Japanese, or Korean.
+- Control dictation hands-free with the vocal phrases .
+- Keep recognition local: Zed sends audio chunks to loopback WebSocket services.
+
+```mermaid
+flowchart LR
+    U[User] -->|Initiated input or system detected start word| Z[Zed Agent panel]
+    Z -->|Audio chunks| R[Realtime STT :8765]
+    R -->|Partial / Final text| Z
+    Z -->|Extracted prompt text| A[Agent]
+    M[Microphone] -->|Audio chunks| D[Background detector :8764]
+    D -->|Start word / Stop word| Z
+```
+
+The background detector starts after the Agent panel is initialised. A detected command affects only the active Zed window when it is showing an Agent thread. The selected language applies to realtime dictation, not to the English command detector. See the extension READMEs for runtime details.
+
+---
+
+# Upstream Zed
 
 [![Zed](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/zed-industries/zed/main/assets/badge/v0.json)](https://zed.dev)
 [![CI](https://github.com/zed-industries/zed/actions/workflows/run_tests.yml/badge.svg)](https://github.com/zed-industries/zed/actions/workflows/run_tests.yml)
@@ -46,4 +72,3 @@ Zed is developed by **Zed Industries, Inc.**, a for-profit company.
 If you’d like to financially support the project, you can do so via GitHub Sponsors.
 Sponsorships go directly to Zed Industries and are used as general company revenue.
 There are no perks or entitlements associated with sponsorship.
-
