@@ -17,7 +17,7 @@ use agent::{
     SandboxStatusKey, SandboxStatusRefresh, SkillLoadingIssue, SkillLoadingIssueKind,
     SkillLoadingIssuesUpdated, ThreadSandbox, VerifiedSandboxStatus,
 };
-use agent_settings::UserAgentsMd;
+use agent_settings::{AgentSettings, UserAgentsMd};
 use agent_voice_detector::{
     DetectorEvent, Transcriber, TranscriberConfig, TranscriberEvent, WebSocketTranscriber,
     DEFAULT_WEBSOCKET_URL,
@@ -74,6 +74,75 @@ enum VoiceInputState {
     #[default]
     Idle,
     Listening,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum VoiceLanguage {
+    English,
+    Russian,
+    French,
+    German,
+    Spanish,
+    Chinese,
+    Italian,
+    Japanese,
+    Korean,
+}
+
+impl VoiceLanguage {
+    const ALL: [Self; 9] = [
+        Self::English,
+        Self::Russian,
+        Self::French,
+        Self::German,
+        Self::Spanish,
+        Self::Chinese,
+        Self::Italian,
+        Self::Japanese,
+        Self::Korean,
+    ];
+
+    fn code(self) -> &'static str {
+        match self {
+            Self::English => "en",
+            Self::Russian => "ru",
+            Self::French => "fr",
+            Self::German => "de",
+            Self::Spanish => "es",
+            Self::Chinese => "zh",
+            Self::Italian => "it",
+            Self::Japanese => "ja",
+            Self::Korean => "ko",
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::English => "English",
+            Self::Russian => "Русский",
+            Self::French => "Français",
+            Self::German => "Deutsch",
+            Self::Spanish => "Español",
+            Self::Chinese => "中文",
+            Self::Italian => "Italiano",
+            Self::Japanese => "日本語",
+            Self::Korean => "한국어",
+        }
+    }
+
+    fn from_code(code: &str) -> Self {
+        match code {
+            "ru" => Self::Russian,
+            "fr" => Self::French,
+            "de" => Self::German,
+            "es" => Self::Spanish,
+            "zh" => Self::Chinese,
+            "it" => Self::Italian,
+            "ja" => Self::Japanese,
+            "ko" => Self::Korean,
+            _ => Self::English,
+        }
+    }
 }
 
 impl VoiceInputState {
@@ -643,6 +712,7 @@ pub struct ThreadView {
     pub _subscriptions: Vec<Subscription>,
     pub message_editor: Entity<MessageEditor>,
     voice_input_state: VoiceInputState,
+    voice_language: VoiceLanguage,
     voice_transcriber: WebSocketTranscriber,
     voice_partial_transcript_range: Option<Range<editor::Anchor>>,
     voice_input_task: Option<Task<()>>,
@@ -1037,6 +1107,9 @@ impl ThreadView {
             in_flight_prompt: None,
             message_editor,
             voice_input_state: VoiceInputState::Idle,
+            voice_language: VoiceLanguage::from_code(
+                &AgentSettings::get_global(cx).voice_input_language,
+            ),
             voice_transcriber: WebSocketTranscriber::new(),
             voice_partial_transcript_range: None,
             voice_input_task: None,
@@ -4201,6 +4274,7 @@ impl ThreadView {
                                             .children(self.mode_selector.clone())
                                             .children(self.model_selector.clone()),
                                     })
+                                    .child(self.render_voice_language_selector(cx))
                                     .child(self.render_voice_input_button(cx))
                                     .child(self.render_send_button(cx)),
                             ),
@@ -5187,6 +5261,46 @@ impl ThreadView {
             }))
     }
 
+    fn render_voice_language_selector(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let selected = self.voice_language;
+        let weak_self = cx.weak_entity();
+        PopoverMenu::new("voice-language-selector")
+            .trigger_with_tooltip(
+                Button::new("voice-language", selected.label())
+                    .label_size(LabelSize::Small)
+                    .color(Color::Muted)
+                    .end_icon(Icon::new(IconName::ChevronDown).size(IconSize::XSmall)),
+                Tooltip::text("Voice Input Language"),
+            )
+            .menu(move |window, cx| {
+                Some(ContextMenu::build(window, cx, |mut menu, _window, _cx| {
+                    for language in VoiceLanguage::ALL {
+                        let entry = ContextMenuEntry::new(language.label())
+                            .toggleable(IconPosition::End, language == selected);
+                        let weak_self = weak_self.clone();
+                        menu.push_item(entry.handler(move |_window, cx| {
+                            weak_self
+                                .update(cx, |this, cx| {
+                                    this.voice_language = language;
+                                    let code = language.code().to_string();
+                                    let fs = this.thread.read(cx).project().read(cx).fs().clone();
+                                    update_settings_file(fs, cx, move |settings, _| {
+                                        if let Some(agent) = settings.agent.as_mut() {
+                                            agent.voice_input_language = Some(code);
+                                        }
+                                    });
+                                    cx.notify();
+                                })
+                                .ok();
+                        }));
+                    }
+                    menu
+                }))
+            })
+            .anchor(gpui::Anchor::BottomRight)
+            .offset(gpui::Point { x: px(0.0), y: px(-2.0) })
+    }
+
     fn render_send_button(&self, cx: &mut Context<Self>) -> AnyElement {
         let message_editor = self.message_editor.read(cx);
         let is_editor_empty = message_editor.is_empty(cx);
@@ -5315,6 +5429,11 @@ impl ThreadView {
         let config = TranscriberConfig {
             websocket_url: DEFAULT_WEBSOCKET_URL.into(),
             input_device: None,
+            http_client: {
+                let project = self.thread.read(cx).project().read(cx);
+                project.client().http_client()
+            },
+            language: self.voice_language.code().into(),
         };
 
         self.voice_input_task = Some(cx.spawn_in(window, async move |this, cx| {

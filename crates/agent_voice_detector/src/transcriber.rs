@@ -1,7 +1,9 @@
 use cpal::DeviceId;
 use futures::channel::mpsc;
 use gpui::{BackgroundExecutor, SharedString, Task};
+use http_client::HttpClient;
 use std::fmt;
+use std::sync::Arc;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TranscriberState {
@@ -23,10 +25,23 @@ pub enum TranscriberEvent {
     Error { message: SharedString },
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct TranscriberConfig {
     pub websocket_url: SharedString,
     pub input_device: Option<DeviceId>,
+    pub http_client: Arc<dyn HttpClient>,
+    pub language: SharedString,
+}
+
+impl fmt::Debug for TranscriberConfig {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TranscriberConfig")
+            .field("websocket_url", &self.websocket_url)
+            .field("input_device", &self.input_device)
+            .field("language", &self.language)
+            .finish()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

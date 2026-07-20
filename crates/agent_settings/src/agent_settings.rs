@@ -221,6 +221,7 @@ pub struct AgentSettings {
     pub thread_summary_model: Option<LanguageModelSelection>,
     pub inline_alternatives: Vec<LanguageModelSelection>,
     pub favorite_models: Vec<LanguageModelSelection>,
+    pub voice_input_language: String,
     pub default_profile: AgentProfileId,
     pub profiles: IndexMap<AgentProfileId, AgentProfileSettings>,
 
@@ -756,6 +757,9 @@ impl Settings for AgentSettings {
             thread_summary_model: agent.thread_summary_model,
             inline_alternatives: agent.inline_alternatives.unwrap_or_default(),
             favorite_models: agent.favorite_models,
+            voice_input_language: agent
+                .voice_input_language
+                .unwrap_or_else(|| "en".to_string()),
             default_profile: AgentProfileId(agent.default_profile.unwrap()),
             profiles: agent
                 .profiles
